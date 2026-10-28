@@ -26,6 +26,9 @@
   .bar > div { height:100%; width:0; background:var(--accent); transition:width .1s linear; }
   ol { margin:8px 0 0; padding-left:20px; color:var(--muted); }
   code { background:#252b34; padding:1px 6px; border-radius:4px; }
+  .fields { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; margin:12px 0; }
+  .fields label { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:13px; }
+  .fields input { font:inherit; color:var(--text); background:#252b34; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
 </style>
 </head>
 <body>
@@ -60,6 +63,22 @@
       <div class="nums" id="nR">–</div>
       <div class="verdict" id="vR">Sin medir todavía.</div>
     </div>
+  </div>
+
+  <div class="panel" id="savePanel">
+    <h2 style="margin:0 0 8px; font-size:17px;">Guardar en DS4Windows</h2>
+    <div id="saveInfo" style="color:var(--muted)">Cargando configuración…</div>
+    <div class="fields">
+      <label>Zona muerta izquierdo <input type="number" id="LSDeadZone" min="0" max="127"></label>
+      <label>Zona muerta derecho <input type="number" id="RSDeadZone" min="0" max="127"></label>
+      <label>Anti-zona muerta izquierdo (%) <input type="number" id="LSAntiDeadZone" min="0" max="100"></label>
+      <label>Anti-zona muerta derecho (%) <input type="number" id="RSAntiDeadZone" min="0" max="100"></label>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <button id="saveBtn" class="primary" disabled>Guardar en DS4Windows</button>
+      <button id="restoreBtn" disabled>Restaurar valores originales</button>
+    </div>
+    <div id="saveMsg" style="margin-top:10px"></div>
   </div>
 </main>
 
@@ -145,6 +164,11 @@ function finishMeasure() {
   for (const [k, s] of Object.entries(sticks)) {
     const v = verdictFor(measuring.max[k]);
     s.deadzone = v.recommended;
+    // Con drift, la anti-zona muerta hace saltar el stick apenas pasa la zona muerta: se baja a 0
+    if (v.cls !== 'ok') {
+      document.getElementById(`${k}SDeadZone`).value = v.recommended;
+      document.getElementById(`${k}SAntiDeadZone`).value = 0;
+    }
     s.verdict.innerHTML =
       `<b class="${v.cls}">${v.label}</b> — se movió solo hasta un ${v.pct.toFixed(1)}%.<br>` +
       (v.cls === 'ok'
@@ -157,6 +181,45 @@ function finishMeasure() {
 }
 
 btn.addEventListener('click', startMeasure);
+
+const FIELDS = ['LSDeadZone', 'RSDeadZone', 'LSAntiDeadZone', 'RSAntiDeadZone'];
+const saveBtn = document.getElementById('saveBtn');
+const restoreBtn = document.getElementById('restoreBtn');
+const saveInfo = document.getElementById('saveInfo');
+const saveMsg = document.getElementById('saveMsg');
+
+function showConfig(cfg) {
+  for (const f of FIELDS) document.getElementById(f).value = cfg[f];
+  saveInfo.innerHTML = `Perfil de DS4Windows: <b>${cfg.profile}</b>. Mide primero y los valores recomendados se rellenan solos; también puedes cambiarlos a mano.`;
+  saveBtn.disabled = false;
+  restoreBtn.disabled = !cfg.backups;
+}
+
+async function post(path, body) {
+  saveBtn.disabled = restoreBtn.disabled = true;
+  saveMsg.textContent = 'Guardando…';
+  try {
+    const res = await (await fetch(path, { method: 'POST', body: JSON.stringify(body || {}) })).json();
+    if (!res.ok) throw new Error(res.error);
+    showConfig(res.config);
+    saveMsg.innerHTML = `<span class="ok">Guardado.</span> ` +
+      (res.restarted ? 'DS4Windows se reinició con los valores nuevos.' : 'Se aplicará la próxima vez que abras DS4Windows.');
+  } catch (e) {
+    saveMsg.innerHTML = `<span class="bad">No se pudo guardar:</span> ${e.message}`;
+    saveBtn.disabled = false;
+  }
+}
+
+saveBtn.addEventListener('click', () => {
+  const body = {};
+  for (const f of FIELDS) body[f] = Number(document.getElementById(f).value);
+  post('/apply', body);
+});
+restoreBtn.addEventListener('click', () => post('/restore'));
+
+fetch('/config').then(r => r.json()).then(showConfig).catch(() => {
+  saveInfo.innerHTML = 'Para poder guardar, abre la app con <code>DriftFix.bat</code> (o el acceso directo del escritorio).';
+});
 
 function loop(now) {
   const p = navigator.getGamepads()[sel.value];
