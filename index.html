@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DriftFix</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --line:#2c333d; --text:#e8ecf1; --muted:#8b95a3; --ok:#3ecf8e; --warn:#f5b942; --bad:#ef5b5b; --accent:#5b9cf5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:26px; }
+  p.sub { margin:0 0 20px; color:var(--muted); }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  select, button { font:inherit; color:var(--text); background:#252b34; border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .sticks { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:16px; }
+  .stick h2 { margin:0 0 8px; font-size:17px; }
+  canvas { width:100%; max-width:260px; aspect-ratio:1; display:block; margin:0 auto; }
+  .nums { font-variant-numeric:tabular-nums; color:var(--muted); text-align:center; margin-top:6px; }
+  .verdict { margin-top:10px; padding:10px 12px; border-radius:8px; background:#20262e; }
+  .verdict b { font-size:18px; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .bar { height:8px; background:#252b34; border-radius:4px; overflow:hidden; margin-top:10px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .1s linear; }
+  ol { margin:8px 0 0; padding-left:20px; color:var(--muted); }
+  code { background:#252b34; padding:1px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>DriftFix</h1>
+  <p class="sub">Mide el drift de cada stick de tu mando y te dice qué zona muerta poner en DS4Windows.</p>
+
+  <div class="panel">
+    <div id="status">Conecta el mando y <b>presiona cualquier botón</b> para que el navegador lo detecte.</div>
+    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <select id="padSelect"></select>
+      <button id="measureBtn" class="primary" disabled>Medir drift (5 s)</button>
+    </div>
+    <div class="bar"><div id="progress"></div></div>
+    <ol>
+      <li>Si ves dos mandos, elige el que dice <b>DualSense</b> (o cierra DS4Windows mientras mides).</li>
+      <li>Deja el mando sobre la mesa, <b>sin tocar los sticks</b>, y pulsa “Medir drift”.</li>
+      <li>Repite 2–3 veces: a veces el drift aparece después de mover el stick y soltarlo.</li>
+    </ol>
+  </div>
+
+  <div class="sticks">
+    <div class="panel stick">
+      <h2>Stick izquierdo</h2>
+      <canvas id="cL" width="520" height="520"></canvas>
+      <div class="nums" id="nL">–</div>
+      <div class="verdict" id="vL">Sin medir todavía.</div>
+    </div>
+    <div class="panel stick">
+      <h2>Stick derecho</h2>
+      <canvas id="cR" width="520" height="520"></canvas>
+      <div class="nums" id="nR">–</div>
+      <div class="verdict" id="vR">Sin medir todavía.</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const MEASURE_MS = 5000;
+// DS4Windows mide la zona muerta en unidades de 0 a 127 (radio del stick)
+const DS4_SCALE = 127;
+const MARGIN = 1.25;
+
+const sel = document.getElementById('padSelect');
+const btn = document.getElementById('measureBtn');
+const statusEl = document.getElementById('status');
+const progress = document.getElementById('progress');
+const sticks = {
+  L: { canvas: document.getElementById('cL'), nums: document.getElementById('nL'), verdict: document.getElementById('vL'), axes: [0, 1], trail: [], deadzone: null },
+  R: { canvas: document.getElementById('cR'), nums: document.getElementById('nR'), verdict: document.getElementById('vR'), axes: [2, 3], trail: [], deadzone: null },
+};
+
+let measuring = null;
+
+function pads() {
+  return [...navigator.getGamepads()].filter(Boolean);
+}
+
+function refreshList() {
+  const list = pads();
+  const current = sel.value;
+  sel.innerHTML = '';
+  for (const p of list) {
+    const o = document.createElement('option');
+    o.value = p.index;
+    o.textContent = `#${p.index} · ${p.id}`;
+    sel.appendChild(o);
+  }
+  if (list.some(p => String(p.index) === current)) sel.value = current;
+  else {
+    const ds = list.find(p => /dualsense|054c/i.test(p.id));
+    if (ds) sel.value = ds.index;
+  }
+  btn.disabled = list.length === 0;
+  statusEl.innerHTML = list.length
+    ? `Mando detectado. Elige cuál medir:`
+    : `Conecta el mando y <b>presiona cualquier botón</b> para que el navegador lo detecte.`;
+}
+
+window.addEventListener('gamepadconnected', refreshList);
+window.addEventListener('gamepaddisconnected', refreshList);
+
+function draw(s, x, y) {
+  const c = s.canvas, g = c.getContext('2d'), w = c.width, r = w / 2 - 20, cx = w / 2;
+  g.clearRect(0, 0, w, w);
+  g.strokeStyle = '#2c333d'; g.lineWidth = 2;
+  g.beginPath(); g.arc(cx, cx, r, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.moveTo(cx - r, cx); g.lineTo(cx + r, cx); g.moveTo(cx, cx - r); g.lineTo(cx, cx + r); g.stroke();
+  if (s.deadzone != null) {
+    g.fillStyle = 'rgba(62,207,142,.15)'; g.strokeStyle = '#3ecf8e';
+    g.beginPath(); g.arc(cx, cx, r * s.deadzone / DS4_SCALE, 0, Math.PI * 2); g.fill(); g.stroke();
+  }
+  g.fillStyle = 'rgba(245,185,66,.5)';
+  for (const [tx, ty] of s.trail) { g.beginPath(); g.arc(cx + tx * r, cx + ty * r, 3, 0, Math.PI * 2); g.fill(); }
+  g.fillStyle = '#5b9cf5';
+  g.beginPath(); g.arc(cx + x * r, cx + y * r, 12, 0, Math.PI * 2); g.fill();
+}
+
+function verdictFor(maxR) {
+  const units = maxR * DS4_SCALE;
+  const pct = maxR * 100;
+  const recommended = Math.min(DS4_SCALE, Math.max(10, Math.ceil(units * MARGIN)));
+  let cls, label;
+  if (pct < 4) { cls = 'ok'; label = 'Sin drift'; }
+  else if (pct < 12) { cls = 'warn'; label = 'Drift leve'; }
+  else { cls = 'bad'; label = 'Drift fuerte'; }
+  return { cls, label, pct, recommended };
+}
+
+function startMeasure() {
+  measuring = { start: performance.now(), max: { L: 0, R: 0 } };
+  for (const s of Object.values(sticks)) { s.trail = []; s.deadzone = null; s.verdict.textContent = 'Midiendo… no toques los sticks.'; }
+  btn.disabled = true;
+}
+
+function finishMeasure() {
+  for (const [k, s] of Object.entries(sticks)) {
+    const v = verdictFor(measuring.max[k]);
+    s.deadzone = v.recommended;
+    s.verdict.innerHTML =
+      `<b class="${v.cls}">${v.label}</b> — se movió solo hasta un ${v.pct.toFixed(1)}%.<br>` +
+      (v.cls === 'ok'
+        ? `No necesitas cambiar nada en este stick.`
+        : `Zona muerta recomendada en DS4Windows: <code>${v.recommended}</code> (${Math.round(v.recommended / DS4_SCALE * 100)}%).`);
+  }
+  measuring = null;
+  progress.style.width = '0';
+  btn.disabled = false;
+}
+
+btn.addEventListener('click', startMeasure);
+
+function loop(now) {
+  const p = navigator.getGamepads()[sel.value];
+  if (p) {
+    for (const [k, s] of Object.entries(sticks)) {
+      const x = p.axes[s.axes[0]] || 0, y = p.axes[s.axes[1]] || 0;
+      const rad = Math.hypot(x, y);
+      s.nums.textContent = `X ${x.toFixed(3)}   Y ${y.toFixed(3)}   desvío ${(rad * 100).toFixed(1)}%`;
+      if (measuring) {
+        measuring.max[k] = Math.max(measuring.max[k], rad);
+        s.trail.push([x, y]);
+      }
+      draw(s, x, y);
+    }
+    if (measuring) {
+      const t = (now - measuring.start) / MEASURE_MS;
+      progress.style.width = Math.min(100, t * 100) + '%';
+      if (t >= 1) finishMeasure();
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+refreshList();
+setInterval(() => { if (!pads().length || sel.options.length !== pads().length) refreshList(); }, 1000);
+requestAnimationFrame(loop);
+for (const s of Object.values(sticks)) draw(s, 0, 0);
+</script>
+</body>
+</html>
